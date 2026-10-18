@@ -68,6 +68,16 @@
     \\              cdp        Chrome DevTools Protocol (WebSocket on /).
     \\              webdriver  WebDriver BiDi (WebSocket on /session) plus the
     \\                         classic WebDriver session endpoints.
+    \\  --remote-allow-origins <ORIGIN>
+    \\          Origin (e.g. http://localhost:3000) allowed in the Origin header
+    \\          of CDP and BiDi WebSocket upgrades, or * to allow any. Can be
+    \\          passed multiple times. Upgrades without an Origin header are
+    \\          always accepted.
+    \\          Defaults to none, rejecting any upgrade that sends an Origin.
+    \\  --unix-socket <PATH>
+    \\          Listen on this Unix-domain socket (mode 0600) instead of TCP.
+    \\          Must be absolute. Cannot be combined with --host, --port or
+    \\          --advertise-host.
     ,
     .fetch =
     \\usage: {0s} fetch <url>... [OPTIONS] [COMMON_OPTIONS]
@@ -97,6 +107,8 @@
     \\                                 PNG image (base64 with --json).
     \\              semantic_tree      JSON-serialized semantic tree.
     \\              semantic_tree_text Pruned plain-text semantic tree.
+    \\              structured_data    JSON-LD, OpenGraph, Twitter card, meta
+    \\                                 and link tags as JSON.
     \\  --dump-max-bytes <INT>
     \\          Soft cap on the dumped html or markdown, in bytes. Output is cut
     \\          at a UTF-8 boundary and a '[truncated]' marker is appended.
@@ -199,6 +211,11 @@
     \\  --host <HOST>
     \\          Host to bind when --port is set (e.g. 0.0.0.0 for all interfaces).
     \\          Defaults to "127.0.0.1".
+    \\  --http-session-timeout <INT>
+    \\          Seconds before an idle HTTP session (--port) is closed. A later
+    \\          request with its Mcp-Session-Id gets 404, so the client starts
+    \\          a new session. The default session is never closed.
+    \\          Defaults to 0, which disables it (sessions live until closed).
     \\  --port <INT>
     \\          Serve MCP over HTTP on this port instead of stdio. Clients POST
     \\          JSON-RPC to /mcp; route requests to a session with the
@@ -452,9 +469,10 @@
     \\             iframe      When enabled, <iframe> elements are fully loaded.
     \\
     \\             image       <img> sources, so that load/error reflects the real
-    \\                         HTTP status. Only the response headers are read;
-    \\                         images are never decoded, so naturalWidth and
-    \\                         naturalHeight stay 0. Delays the window load event.
+    \\                         HTTP status. Images are never decoded: only the
+    \\                         first 16KB is read, for naturalWidth and
+    \\                         naturalHeight (PNG, GIF, JPEG and WebP; 0 for
+    \\                         other formats). Delays the window load event.
     \\
     \\             stylesheet  Fetch external <link rel=stylesheet> resources so
     \\                         their rules contribute to computed styles (and

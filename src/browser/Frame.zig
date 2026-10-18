@@ -305,6 +305,11 @@ _parent_notified: bool = false,
 // load the iframe, but we won't delay the parent
 _delays_parent_load: bool = true,
 
+// Set while window.load is being dispatched. A load handler that open()s,
+// write()s and close()s again gets readystatechange and DOMContentLoaded, but
+// not a nested load (as in Chrome).
+_load_event_in_progress: bool = false,
+
 _type: enum { root, frame }, // only used for logs right now
 _req_id: u32 = 0,
 _navigated_options: ?NavigatedOpts = null,
@@ -756,7 +761,7 @@ pub fn navigate(self: *Frame, request_url: [:0]const u8, opts: NavigateOpts) !vo
 
         if (is_blob) {
             // strip out blob:
-            self.origin = try URL.getOrigin(self.page_arena, request_url[5.. :0]);
+            self.origin = try URL.getOrigin(self.page_arena, self.url[5.. :0]);
         } else if (self.parent) |parent| {
             self.origin = parent.origin;
             if (is_about_blank or is_srcdoc) {
@@ -854,8 +859,9 @@ pub fn navigate(self: *Frame, request_url: [:0]const u8, opts: NavigateOpts) !vo
         });
 
         if (self.parent == null) {
-            session.navigation._current_navigation_kind = opts.kind;
-            try session.navigation.commitNavigation(self);
+            const navigation = session.navigationFor(self);
+            navigation._current_navigation_kind = opts.kind;
+            try navigation.commitNavigation(self);
         }
 
         self.documentIsComplete();
@@ -952,7 +958,7 @@ pub fn navigate(self: *Frame, request_url: [:0]const u8, opts: NavigateOpts) !vo
     // Record telemetry for navigation
     self.recordNavigateTelemetry(std.ascii.startsWithIgnoreCase(self.url, "https://"));
 
-    session.navigation._current_navigation_kind = opts.kind;
+    session.navigationFor(self)._current_navigation_kind = opts.kind;
 
     transfer.submit() catch |err| {
         log.debug(.frame, "navigate request", .{ .url = self.url, .err = err, .type = self._type });
@@ -1092,7 +1098,7 @@ fn scheduleNavigationWithArena(originator: *Frame, arena: *lp.Arena, request_url
         });
 
         if (target.parent == null) {
-            try session.navigation.updateEntries(target.url, opts.kind, target, true);
+            try session.navigationFor(target).updateEntries(target.url, opts.kind, target, true);
         }
 
         // `:target` matches off the fragment, which just changed.
@@ -1478,29 +1484,16 @@ pub fn pendingLoadCompleted(self: *Frame) void {
 
 // A document.open() has been closed. If it was opened after it loaded, it
 // will re-trigger DOMContentLoaded and load.
-pub fn scriptCreatedParserDone(self: *Frame) !void {
+pub fn scriptCreatedParserDone(self: *Frame) void {
     switch (self._load_state) {
         .parsing, .load => {},
         .waiting => self._load_state = .parsing,
         .complete => {
-            // Queued, as in Chrome: firing from within document.close() lets
-            // a load handler that writes + closes again recurse into itself.
-            return self.js.scheduler.add(self, struct {
-                fn run(ctx: *anyopaque) !?u32 {
-                    const f: *Frame = @ptrCast(@alignCast(ctx));
-                    // re-opened since: its own close() queues the events
-                    if (f.document._script_created_parser != null) {
-                        return null;
-                    }
-                    f._load_state = .parsing;
-                    f._parent_notified = false;
-                    // the parent was already released the first time, we don't
-                    // want documentIsComplete to re-trigger it.
-                    f._delays_parent_load = false;
-                    f.documentIsComplete();
-                    return null;
-                }
-            }.run, 0, .{ .name = "frame.scriptCreatedParserDone" });
+            self._load_state = .parsing;
+            self._parent_notified = false;
+            // the parent was already released the first time, we don't
+            // want documentIsComplete to re-trigger it.
+            self._delays_parent_load = false;
         },
     }
     self.documentIsComplete();
@@ -1550,6 +1543,10 @@ fn _documentIsComplete(self: *Frame) !void {
     try self.dispatchQueuedEvents();
     if (self.loadEventsAborted()) return;
 
+    // A close() from within our own load handler: the outer dispatch
+    // finishes the load steps.
+    if (self._load_event_in_progress) return;
+
     // Dispatch window.load event.
     const window_target = self.window.asEventTarget();
     if (self._event_manager.hasDirectListeners(window_target, "load")) {
@@ -1557,6 +1554,8 @@ fn _documentIsComplete(self: *Frame) !void {
         // This event is weird, it's dispatched directly on the window, but
         // with the document as the target.
         event._target = self.document.asEventTarget();
+        self._load_event_in_progress = true;
+        defer self._load_event_in_progress = false;
         try self._event_manager.dispatchDirect(window_target, event, .{ .inject_target = false, .context = "page load" });
     }
 
@@ -1994,7 +1993,7 @@ fn frameDoneCallback(ctx: *anyopaque) !void {
     }
 
     //We need to handle different navigation types differently.
-    try self._session.navigation.commitNavigation(self);
+    try self._session.navigationFor(self).commitNavigation(self);
 
     if (self._pending_content_type) |content_type| {
         self.document._content_type = content_type;
@@ -2434,6 +2433,10 @@ pub fn openPopup(self: *Frame, opts: OpenPopupOpts) !*Frame {
     try Frame.init(popup, frame_id, page, .{});
     errdefer popup.deinit();
 
+    // A popup is a top-level browsing context: it has its own session history.
+    try session.createNavigation(popup);
+    errdefer session.removeNavigation(frame_id);
+
     popup.window._opener = opts.opener;
 
     if (opts.name.len > 0 and
@@ -2763,7 +2766,7 @@ pub fn loadExternalStylesheet(self: *Frame, link: *Element.Html.Link, href: []co
     sm.is_evaluating = true;
     defer sm.endEvaluationWindow(was_evaluating);
 
-    var response = transfer.submitSync(.{ .copy_headers = true }) catch |err| {
+    var response = transfer.submitSync(.{}) catch |err| {
         log.debug(.http, "external stylesheet fetch", .{ .err = err, .url = resolved });
         return self.fireElementEvent(element, comptime .wrap("error"));
     };
@@ -2807,7 +2810,7 @@ pub fn loadExternalStylesheet(self: *Frame, link: *Element.Html.Link, href: []co
     // scratch-list pattern in `CSSStyleSheet.replaceSync`. Keeping
     // `_href` consistent with what the sheet actually contains is the
     // minimum.
-    const content_type: ?Mime = if (HttpClient.findHeader(response.headers, "content-type")) |value|
+    const content_type: ?Mime = if (response.content_type) |value|
         Mime.parse(value) catch null
     else
         null;
@@ -3296,8 +3299,10 @@ fn _insertNodeRelative(self: *Frame, comptime from_parser: bool, parent: *Node, 
     if (child.is(Element.Html.Image)) |img| {
         // noop if it didn't actually change
         try img.sourceChanged(self);
-    } else {
-        try Element.Html.Picture.childInserted(parent, child, self);
+    } else if (child.is(Element.Html.Source)) |source| {
+        try Element.Html.Picture.sourceInserted(parent, source, self);
+    } else if (child.is(Element.Html.Track)) |track| {
+        try track.insertedInto(parent, self);
     }
 
     // Update live ranges for insertion (DOM spec insert step 6).

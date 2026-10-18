@@ -47,7 +47,7 @@ pub fn id(self: *const NavigationHistoryEntry) []const u8 {
 }
 
 pub fn index(self: *const NavigationHistoryEntry, frame: *Frame) i32 {
-    const navigation = frame._session.navigation;
+    const navigation = frame._session.navigationFor(frame);
 
     for (navigation._entries.items, 0..) |entry, i| {
         if (std.mem.eql(u8, entry._id, self._id)) {
@@ -98,7 +98,6 @@ pub const JsApi = struct {
 
     pub const Meta = struct {
         pub const name = "NavigationHistoryEntry";
-        pub const prototype_chain = bridge.prototypeChain();
         pub var class_id: bridge.ClassId = undefined;
     };
 

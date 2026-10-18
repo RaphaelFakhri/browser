@@ -549,8 +549,24 @@ pub fn insertAdjacentHTML(
     html_or_xml: []const u8,
     frame: *Frame,
 ) !void {
-    const he = self.is(Html) orelse return error.NotHtmlElement;
-    return he.insertAdjacentHTML(position, html_or_xml, frame);
+    const node = self.asNode();
+
+    // The parse context is the node we insert into
+    const context_node, _ = try node.findAdjacentNodes(position, .html);
+    const context = if (context_node.is(Element)) |el|
+        if (el.is(Html.Html) == null) el else null
+    else
+        null;
+
+    const fragment = (try Node.DocumentFragment.init(node.getDocument(frame), frame)).asNode();
+    try Frame.parse.fragment(frame, fragment, html_or_xml, .{ .context = context });
+
+    const target_node, const prev_node = try node.findAdjacentNodes(position, .html);
+
+    var iter = fragment.childrenIterator();
+    while (iter.next()) |child_node| {
+        _ = try target_node.insertBefore(child_node, prev_node, frame);
+    }
 }
 
 pub fn requestFullscreen(_: *const Element, frame: *Frame) js.Promise {
@@ -1316,25 +1332,7 @@ pub fn focus(self: *Element, frame: *Frame) !void {
         return;
     }
 
-    // The focus chain runs through navigable containers: each <iframe> holding
-    // the focused document is the focused area of its parent document, so the
-    // parent's activeElement is that <iframe>. Like Chrome, ancestors blur
-    // their previous element first, and the <iframe> itself gets no focus events.
-    // https://html.spec.whatwg.org/multipage/interaction.html#focus-chain
-    var child = owner;
-    while (child.iframe) |container| {
-        const parent = child.parent orelse break;
-        const parent_doc = parent.document;
-        const old = parent_doc._active_element;
-        if (old == container.asElement()) {
-            break;
-        }
-        parent_doc.setActiveElement(container.asElement(), parent);
-        if (old) |o| {
-            _ = try blurFocusedArea(o, null, parent);
-        }
-        child = parent;
-    }
+    try focusFrameAncestors(owner);
 
     if (already_active) {
         return;
@@ -1356,6 +1354,29 @@ pub fn focus(self: *Element, frame: *Frame) !void {
     // Dispatch focusin on new element (bubbles, composed)
     const focusin_event = try FocusEvent.initTrusted(comptime .wrap("focusin"), .{ .bubbles = true, .composed = true, .relatedTarget = old_related }, owner);
     try owner._event_manager.dispatch(new_target, focusin_event.asEvent());
+}
+
+/// Establish the iframe containers of a focused element or document viewport.
+pub fn focusFrameAncestors(owner: *Frame) !void {
+    // The focus chain runs through navigable containers: each <iframe> holding
+    // the focused document is the focused area of its parent document, so the
+    // parent's activeElement is that <iframe>. Like Chrome, ancestors blur
+    // their previous element first, and the <iframe> itself gets no focus events.
+    // https://html.spec.whatwg.org/multipage/interaction.html#focus-chain
+    var child = owner;
+    while (child.iframe) |container| {
+        const parent = child.parent orelse break;
+        const parent_doc = parent.document;
+        const old = parent_doc._active_element;
+        if (old == container.asElement()) {
+            break;
+        }
+        parent_doc.setActiveElement(container.asElement(), parent);
+        if (old) |o| {
+            _ = try blurFocusedArea(o, null, parent);
+        }
+        child = parent;
+    }
 }
 
 // `old` just lost focus in `frame`'s document. When it's an <iframe> holding
@@ -1688,6 +1709,13 @@ pub fn boxAxis(self: *Element, frame: *Frame, comptime axis: Axis) f64 {
         return own.value;
     }
 
+    if (axis == .width) {
+        const owner = self.ownerFrame(frame) orelse return own.value;
+        if (owner._style_manager.widthFromContainingBlock(self)) {
+            return own.value;
+        }
+    }
+
     return @max(own.value, self.contentAxis(frame, axis));
 }
 
@@ -1707,9 +1735,12 @@ pub fn boundingClientRectValues(self: *Element, frame: *Frame) DOMRect.Data {
 
 // Some cases need the bounding rect but have already done the visibility check.
 pub fn boundingClientRectValuesForVisible(self: *Element, frame: *Frame) DOMRect.Data {
+    // Client rects are viewport-relative: offset the faux-layout document
+    // position by the owning window's scroll position.
+    const window = (self.ownerFrame(frame) orelse frame).window;
     return .{
-        .x = self.horizontalPosition(frame),
-        .y = calculateDocumentPosition(self.asNode()),
+        .x = self.horizontalPosition(frame) - @as(f64, @floatFromInt(window.getScrollX())),
+        .y = calculateDocumentPosition(self.asNode()) - @as(f64, @floatFromInt(window.getScrollY())),
         .width = self.boxAxis(frame, .width),
         .height = self.boxAxis(frame, .height),
     };
@@ -1837,9 +1868,8 @@ fn scrollExtent(self: *Element, frame: *Frame, comptime axis: Axis) ?f64 {
 // The dummy layout engine has no line-breaking, and an element only overflows
 // horizontally when its children don't wrap (white-space:nowrap, a flex row, an
 // inline-block strip), so the single-row assumption covers the case that
-// matters. We can't detect the layout mode to do better: existingStyle() sees only
-// the inline `style=` attribute, and the computed cascade resolves stylesheet
-// rules for `display:none` and `visibility` alone.
+// matters. We don't detect the layout mode to do better: the cascade resolves
+// too few properties to lay out lines.
 //
 // Only direct children are measured, never the whole subtree. This runs on
 // every size read, and recursing would make an element's cost O(subtree)
@@ -2123,7 +2153,7 @@ pub fn scrollIntoViewIfNeeded(self: *Element, center_if_needed: ?bool, frame: *F
     const y = calculateDocumentPosition(self.asNode());
     const scroll_y: f64 = @floatFromInt(frame.window.getScrollY());
     const viewport_height: f64 = @floatFromInt(frame.window.getInnerHeight(frame));
-    if (y >= scroll_y and y <= scroll_y + viewport_height) {
+    if (y >= scroll_y and y < scroll_y + viewport_height) {
         return;
     }
     self.scrollIntoView(null, frame);
@@ -2628,7 +2658,6 @@ pub const JsApi = struct {
 
     pub const Meta = struct {
         pub const name = "Element";
-        pub const prototype_chain = bridge.prototypeChain();
         pub var class_id: bridge.ClassId = undefined;
     };
 
@@ -2639,13 +2668,6 @@ pub const JsApi = struct {
     // the frame-aware variant returns the original URI for namespaces
     // outside the built-in set instead of the placeholder
     pub const namespaceURI = bridge.accessor(Element.getNamespaceUri, null, .{});
-
-    pub const innerText = bridge.accessor(_innerText, Element.setInnerText, .{ .ce_reactions = true });
-    fn _innerText(self: *Element, frame: *Frame) ![]const u8 {
-        var buf = std.Io.Writer.Allocating.init(frame.local_arena);
-        try self.getInnerText(&buf.writer, frame);
-        return buf.written();
-    }
 
     pub const outerHTML = bridge.accessor(_getOuterHTML, _setOuterHTML, .{ .ce_reactions = true });
     fn _getOuterHTML(self: *Element, frame: *Frame) ![]const u8 {

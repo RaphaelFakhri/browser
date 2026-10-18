@@ -544,7 +544,6 @@ pub const JsApi = struct {
 
     pub const Meta = struct {
         pub const name = "Navigation";
-        pub const prototype_chain = bridge.prototypeChain();
         pub var class_id: bridge.ClassId = undefined;
     };
 
@@ -572,10 +571,10 @@ test "Navigation: about:blank commits entry" {
     const frame = try testing.createFrame();
     defer testing.test_session.closeAllPages();
 
-    // The test_session is shared; prior tests leak entries into it via
-    // session.navigation. Reset it so we exercise a fresh session-style state.
-    testing.test_session.navigation._entries.clearRetainingCapacity();
-    testing.test_session.navigation._index = 0;
+    // Drop the entry createPage seeds so we exercise an empty stack.
+    const navigation = testing.test_session.navigationFor(frame);
+    navigation._entries.clearRetainingCapacity();
+    navigation._index = 0;
 
     try frame.navigate("about:blank", .{});
     try testing.waitForFrame();
@@ -599,8 +598,9 @@ test "Navigation: reload on empty stack seeds an entry" {
     const frame = try testing.createFrame();
     defer testing.test_session.closeAllPages();
 
-    testing.test_session.navigation._entries.clearRetainingCapacity();
-    testing.test_session.navigation._index = 0;
+    const navigation = testing.test_session.navigationFor(frame);
+    navigation._entries.clearRetainingCapacity();
+    navigation._index = 0;
 
     // Mirrors CDP Page.reload arriving on a fresh session: doReload reads
     // frame.url (default "about:blank") and routes through the synchronous

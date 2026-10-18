@@ -93,28 +93,6 @@ pub fn Builder(comptime T: type) type {
             }
             @compileError("Property for " ++ @typeName(@TypeOf(value)) ++ " hasn't been defined yet");
         }
-
-        const PrototypeChainEntry = @import("TaggedOpaque.zig").PrototypeChainEntry;
-        pub fn prototypeChain() [prototypeChainLength(T)]PrototypeChainEntry {
-            var entries: [prototypeChainLength(T)]PrototypeChainEntry = undefined;
-
-            entries[0] = .{ .offset = 0, .index = JsApiLookup.getId(T.JsApi) };
-
-            if (entries.len == 1) {
-                return entries;
-            }
-
-            var Prototype = T;
-            inline for (entries[1..]) |*entry| {
-                const Next = PrototypeType(Prototype).?;
-                entry.* = .{
-                    .index = JsApiLookup.getId(Next.JsApi),
-                    .offset = Factory.protoOffset(Prototype),
-                };
-                Prototype = Next;
-            }
-            return entries;
-        }
     };
 }
 
@@ -892,22 +870,6 @@ pub fn unknownWindowPropertyCallback(c_name: ?*const v8.Name, handle: ?*const v8
 //     }
 // }
 
-// Given a Type, returns the length of the prototype chain, including self
-fn prototypeChainLength(comptime T: type) usize {
-    var l: usize = 1;
-    var Next = T;
-    while (PrototypeType(Next)) |N| {
-        Next = N;
-        l += 1;
-    }
-    return l;
-}
-
-// Given a Type, gets its prototype Type (if any)
-fn PrototypeType(comptime T: type) ?type {
-    return reflect.Proto(T);
-}
-
 fn flattenTypes(comptime Types: []const type) [countFlattenedTypes(Types)]type {
     @setEvalBranchQuota(10_000);
     var index: usize = 0;
@@ -1256,8 +1218,12 @@ pub const PageJsApis = flattenTypes(&.{
     @import("../webapi/ServiceWorkerContainer.zig"),
     @import("../webapi/ServiceWorkerRegistration.zig"),
     @import("../webapi/media/MediaError.zig"),
+    @import("../webapi/media/TextTrack.zig"),
     @import("../webapi/media/TextTrackCue.zig"),
+    @import("../webapi/media/TextTrackCueList.zig"),
+    @import("../webapi/media/TextTrackList.zig"),
     @import("../webapi/media/VTTCue.zig"),
+    @import("../webapi/media/VTTRegion.zig"),
     @import("../webapi/animation/Animation.zig"),
     @import("../webapi/EventTarget.zig"),
     @import("../webapi/Location.zig"),
@@ -1336,7 +1302,40 @@ pub const PageJsApis = flattenTypes(&.{
     @import("../webapi/Sanitizer.zig"),
     @import("../webapi/Lock.zig"),
     @import("../webapi/LockManager.zig"),
+    @import("../webapi/webcodecs/encoded_chunk.zig"),
+    @import("../webapi/webcodecs/AudioData.zig"),
+    @import("../webapi/webcodecs/VideoColorSpace.zig"),
+    @import("../webapi/webcodecs/VideoFrame.zig"),
+    @import("../webapi/webcodecs/AudioDecoder.zig"),
+    @import("../webapi/webcodecs/AudioEncoder.zig"),
+    @import("../webapi/webcodecs/VideoDecoder.zig"),
+    @import("../webapi/webcodecs/VideoEncoder.zig"),
+    @import("../webapi/webaudio/AudioBuffer.zig"),
+    @import("../webapi/webaudio/AudioParam.zig"),
+    @import("../webapi/webaudio/PeriodicWave.zig"),
+    @import("../webapi/webaudio/BaseAudioContext.zig"),
+    @import("../webapi/webaudio/OfflineAudioContext.zig"),
+    @import("../webapi/webaudio/OfflineAudioCompletionEvent.zig"),
+    @import("../webapi/webaudio/AudioNode.zig"),
+    @import("../webapi/webaudio/AudioDestinationNode.zig"),
+    @import("../webapi/webaudio/AudioScheduledSourceNode.zig"),
+    @import("../webapi/webaudio/AudioBufferSourceNode.zig"),
+    @import("../webapi/webaudio/ConstantSourceNode.zig"),
+    @import("../webapi/webaudio/OscillatorNode.zig"),
+    @import("../webapi/webaudio/GainNode.zig"),
+    @import("../webapi/webaudio/DynamicsCompressorNode.zig"),
 });
+
+const webcodecs_apis = [_]type{
+    @import("../webapi/webcodecs/encoded_chunk.zig"),
+    @import("../webapi/webcodecs/AudioData.zig"),
+    @import("../webapi/webcodecs/VideoColorSpace.zig"),
+    @import("../webapi/webcodecs/VideoFrame.zig"),
+    @import("../webapi/webcodecs/AudioDecoder.zig"),
+    @import("../webapi/webcodecs/AudioEncoder.zig"),
+    @import("../webapi/webcodecs/VideoDecoder.zig"),
+    @import("../webapi/webcodecs/VideoEncoder.zig"),
+};
 
 // APIs available on EVERY worker global — dedicated, shared and service. This
 // is the WebIDL `[Exposed=Worker]` set, which covers all three. Each kind's
@@ -1437,7 +1436,7 @@ const worker_extended_apis = worker_common_apis ++ [_]type{
     @import("../webapi/FileReaderSync.zig"),
 };
 
-pub const DedicatedWorkerJsApis = flattenTypes(&([_]type{@import("../webapi/DedicatedWorkerGlobalScope.zig")} ++ worker_extended_apis));
+pub const DedicatedWorkerJsApis = flattenTypes(&([_]type{@import("../webapi/DedicatedWorkerGlobalScope.zig")} ++ worker_extended_apis ++ webcodecs_apis));
 pub const SharedWorkerJsApis = flattenTypes(&([_]type{@import("../webapi/SharedWorkerGlobalScope.zig")} ++ worker_extended_apis));
 
 pub const ServiceWorkerJsApis = flattenTypes(&([_]type{

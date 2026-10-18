@@ -174,15 +174,25 @@ pub const KeyData = union(enum) {
     bytes: js.TypedArray(u8),
     jwk: Jwk,
 
-    /// Minimal JWK fields we read on import. Symmetric ("oct") keys only need
-    /// `kty` and `k`; `d` marks an asymmetric private key. The rest are accepted
-    /// for forward-compatibility.
-    const Jwk = struct {
+    /// The JWK fields we read on import. Symmetric ("oct") keys only need `kty`
+    /// and `k`; `d` marks an asymmetric private key. RSA keys carry `n`/`e`
+    /// (public) plus `d`, `p`, `q`, `dp`, `dq`, `qi` (private). Every member is
+    /// optional in the JsonWebKey dictionary, `kty` included: a missing `kty`
+    /// is a DataError of the algorithm's import, not a binding TypeError.
+    pub const Jwk = struct {
         alg: ?[]const u8 = null,
         d: ?[]const u8 = null,
+        dp: ?[]const u8 = null,
+        dq: ?[]const u8 = null,
+        e: ?[]const u8 = null,
         ext: ?bool = null,
         k: ?[]const u8 = null,
-        kty: []const u8,
+        key_ops: ?[]const []const u8 = null,
+        kty: ?[]const u8 = null,
+        n: ?[]const u8 = null,
+        p: ?[]const u8 = null,
+        q: ?[]const u8 = null,
+        qi: ?[]const u8 = null,
         use: ?[]const u8 = null,
     };
 };
@@ -216,14 +226,10 @@ pub const Sign = union(enum) {
     string: []const u8,
     object: struct { name: []const u8 },
 
-    pub fn isHMAC(self: Sign) bool {
-        const name = switch (self) {
+    pub fn algoName(self: Sign) []const u8 {
+        return switch (self) {
             .string => |string| string,
             .object => |object| object.name,
         };
-
-        if (name.len < 4) return false;
-        const hmac: u32 = @bitCast([4]u8{ 'H', 'M', 'A', 'C' });
-        return @as(u32, @bitCast(name[0..4].*)) == hmac;
     }
 };

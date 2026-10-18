@@ -21,6 +21,7 @@
 const js = @import("../../../js/js.zig");
 const Frame = @import("../../../Frame.zig");
 
+const Event = @import("../../Event.zig");
 const Element = @import("../../Element.zig");
 const ElementInternals = @import("../../ElementInternals.zig");
 
@@ -122,6 +123,39 @@ pub fn getValid(self: *const ValidityState, frame: *Frame) bool {
         !self.getCustomError();
 }
 
+// Whether the element satisfies its constraints, or null when it is not a
+// candidate for constraint validation (it then matches neither :valid nor
+// :invalid).
+pub fn isValid(element: *Element, frame: *Frame) ?bool {
+    const will_validate = if (element.is(Input)) |input|
+        input.getWillValidate()
+    else if (element.is(Select)) |select|
+        select.getWillValidate()
+    else if (element.is(TextArea)) |textarea|
+        textarea.getWillValidate()
+    else if (element.is(Button)) |button|
+        button.getWillValidate()
+    else if (element.is(Custom)) |custom|
+        custom.isFormAssociated() and custom.willValidate()
+    else
+        return null;
+    if (will_validate == false) {
+        return null;
+    }
+    const validity: ValidityState = .{ ._owner = element };
+    return validity.getValid(frame);
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#check-validity-steps
+pub fn checkValidity(element: *Element, frame: *Frame) !bool {
+    if (isValid(element, frame) orelse true) {
+        return true;
+    }
+    const event = try Event.initTrusted(comptime .wrap("invalid"), .{ .cancelable = true }, frame.page);
+    try frame._event_manager.dispatch(element.asEventTarget(), event);
+    return false;
+}
+
 // A form-associated custom element's flags are whatever its ElementInternals
 // last passed to setValidity().
 fn customFlags(self: *const ValidityState) ?ElementInternals.ValidityFlags {
@@ -135,7 +169,6 @@ pub const JsApi = struct {
 
     pub const Meta = struct {
         pub const name = "ValidityState";
-        pub const prototype_chain = bridge.prototypeChain();
         pub var class_id: bridge.ClassId = undefined;
     };
 

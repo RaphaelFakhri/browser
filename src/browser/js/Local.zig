@@ -299,21 +299,9 @@ pub fn mapZigInstanceToJs(self: *const Local, js_obj_handle: ?*const v8.Object, 
             };
 
             if (!@hasDecl(JsApi.Meta, "empty_with_no_proto")) {
-                // The TAO contains the pointer to our Zig instance as
-                // well as any meta data we'll need to use it later.
-                // See the TaggedOpaque struct for more details.
-                // Use identity_arena so TAOs survive context destruction. V8 objects
-                // are stored in identity_map (session-level) and may be referenced
-                // after their creating context is destroyed (e.g., via microtasks).
-                const tao = try ctx.identity_arena.create(TaggedOpaque);
-                tao.* = .{
-                    .value = resolved.ptr,
-                    .prototype_chain = resolved.prototype_chain.ptr,
-                    .prototype_len = @intCast(resolved.prototype_chain.len),
-                    .subtype = inspectorSubtype(resolved.prototype_chain),
-                };
-
-                v8.v8__Object__SetAlignedPointerInInternalField(js_obj.handle, 0, tao);
+                // The TAO tells us the Zig instance and its type, so that
+                // we can map back from JS. See TaggedOpaque for details.
+                try resolved.tagged.store(js_obj.handle, ctx.identity_arena);
             } else {
                 // If the struct is empty, we don't need to do all
                 // the TOA stuff and setting the internal data.
@@ -749,6 +737,10 @@ fn jsValueToStruct(self: *const Local, comptime T: type, js_val: js.Value) !?T {
         return T{ .value = try self.jsValueToZig(T.js_nullable, js_val) };
     }
 
+    if (@hasDecl(T, "js_enforce_range")) {
+        return T{ .value = try js.enforceRange(T.js_enforce_range, try js_val.toF64()) };
+    }
+
     return switch (T) {
         js.Function, js.Function.Global => {
             if (!js_val.isFunction()) {
@@ -781,6 +773,10 @@ fn jsValueToStruct(self: *const Local, comptime T: type, js_val: js.Value) !?T {
                     return error.TypeError;
                 }
             }
+            const bytes = (try jsValueToArrayBufferSlice(u8, true, js_val)) orelse return null;
+            return .{ .bytes = bytes };
+        },
+        js.AllowSharedBufferSource => {
             const bytes = (try jsValueToArrayBufferSlice(u8, true, js_val)) orelse return null;
             return .{ .bytes = bytes };
         },
@@ -884,9 +880,9 @@ pub const dictionary_group_marker = "js_grouped_dictionary";
 // automatically, but it's a lot easier just to check it and ask for a manual fix.
 pub fn assertDictionaryFieldOrder(comptime T: type) void {
     const field_names = @typeInfo(T).@"struct".field_names;
-    var i: usize = 1;
-    while (i < field_names.len) : (i += 1) {
-        if (std.mem.order(u8, field_names[i - 1], field_names[i]) == .gt) {
+    if (field_names.len < 2) return;
+    for (field_names[0 .. field_names.len - 1], field_names[1..]) |prev, next| {
+        if (std.mem.order(u8, prev, next) == .gt) {
             @compileError("dictionary fields must be declared in lexicographic order: " ++ @typeName(T));
         }
     }
@@ -1311,7 +1307,7 @@ fn jsInt64ToZig(comptime T: type, number: f64) !T {
 const Resolved = struct {
     ptr: *anyopaque,
     class_id: u16,
-    prototype_chain: []const @import("TaggedOpaque.zig").PrototypeChainEntry,
+    tagged: TaggedOpaque,
     finalizer: ?Finalizer,
 
     const Finalizer = struct {
@@ -1376,7 +1372,7 @@ fn resolveT(comptime T: type, value: *T) Resolved {
     return .{
         .ptr = value,
         .class_id = if (@hasDecl(Meta, "wrap_as")) Meta.wrap_as.Meta.class_id else Meta.class_id,
-        .prototype_chain = &Meta.prototype_chain,
+        .tagged = .init(T, value),
         .finalizer = blk: {
             const FT = (comptime findFinalizerType(T)) orelse break :blk null;
             const getFinalizerPtr = comptime finalizerPtrGetter(T, FT);
@@ -1655,15 +1651,3 @@ pub const Scope = struct {
         return self.local.toLocal(global);
     }
 };
-
-// The subtype the inspector reports for one of our objects, as Chrome does:
-// "node" for Nodes, "error" for DOMExceptions, none for everything else.
-fn inspectorSubtype(prototype_chain: []const TaggedOpaque.PrototypeChainEntry) ?bridge.SubType {
-    const node_index = bridge.JsApiLookup.getId(@import("../webapi/Node.zig").JsApi);
-    const dom_exception_index = bridge.JsApiLookup.getId(@import("../webapi/DOMException.zig").JsApi);
-    for (prototype_chain) |proto| {
-        if (proto.index == node_index) return .node;
-        if (proto.index == dom_exception_index) return .@"error";
-    }
-    return null;
-}

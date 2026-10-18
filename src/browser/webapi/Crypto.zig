@@ -84,7 +84,6 @@ pub const JsApi = struct {
 
     pub const Meta = struct {
         pub const name = "Crypto";
-        pub const prototype_chain = bridge.prototypeChain();
         pub var class_id: bridge.ClassId = undefined;
         pub const empty_with_no_proto = true;
     };
@@ -96,5 +95,7 @@ pub const JsApi = struct {
 
 const testing = @import("../../testing.zig");
 test "WebApi: Crypto" {
+    // pbkdf2 limit tests
+    testing.expectLog(&.{ .js, .js });
     try testing.htmlRunner("crypto.html", .{});
 }

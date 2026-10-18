@@ -137,22 +137,6 @@ pub fn acquireRef(self: *CryptoKey) void {
     self._rc.acquire();
 }
 
-pub fn canEncrypt(self: *const CryptoKey) bool {
-    return self._usages & Usages.encrypt != 0;
-}
-
-pub fn canDecrypt(self: *const CryptoKey) bool {
-    return self._usages & Usages.decrypt != 0;
-}
-
-pub fn canSign(self: *const CryptoKey) bool {
-    return self._usages & Usages.sign != 0;
-}
-
-pub fn canVerify(self: *const CryptoKey) bool {
-    return self._usages & Usages.verify != 0;
-}
-
 pub fn canDeriveBits(self: *const CryptoKey) bool {
     return self._usages & Usages.deriveBits != 0;
 }
@@ -255,7 +239,6 @@ pub const JsApi = struct {
         pub const name = "CryptoKey";
 
         pub var class_id: bridge.ClassId = undefined;
-        pub const prototype_chain = bridge.prototypeChain();
     };
 
     pub const @"type" = bridge.accessor(CryptoKey.getType, null, .{});

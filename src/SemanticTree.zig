@@ -81,8 +81,8 @@ pub fn init(arena: std.mem.Allocator, node: *Node, registry: *NodeRegistry, fram
     };
 }
 
-/// Walk the pruned tree with `visitor`: `visit(*Node, *NodeData) !bool`
-/// returns whether to descend into the children, `leave() !void` closes a
+/// Walk the pruned tree with `visitor`: `visit(*Node, *NodeData) !Walk`
+/// says which descendants to visit, `leave() !void` closes a
 /// visited node. An optional `visitPruned(*Node, *NodeData) !bool` sees the
 /// nodes pruning skips, and returns whether to get a `leave()` for it too.
 fn visitAll(self: @This(), visitor: anytype) error{WriteFailed}!void {
@@ -135,19 +135,19 @@ const TextVisitor = struct {
     /// Per open node, whether it took a line and so indents its children.
     indents: std.ArrayList(bool) = .empty,
 
-    pub fn visit(self: *TextVisitor, node: *Node, data: *NodeData) !bool {
+    pub fn visit(self: *TextVisitor, node: *Node, data: *NodeData) !Walk {
         // Without ids, a wrapper with no role, name or state would be a blank
         // line: skip it and let its children take its place.
         if (!self.tree.ids and isBlankLine(node, data)) {
             try self.indents.append(self.tree.arena, false);
-            return true;
+            return .all;
         }
         try self.indents.append(self.tree.arena, true);
         try self.writer.splatByteAll(' ', self.depth);
         const line = try self.tree.writeTextLine(self.writer, node, data);
         try self.writer.writeByte('\n');
         self.depth += 1;
-        return line.walk_children;
+        return line.children;
     }
 
     pub fn leave(self: *TextVisitor) !void {
@@ -195,7 +195,7 @@ const LineCollector = struct {
     lines: std.ArrayList(Line) = .empty,
     current: ?u32 = null,
 
-    pub fn visit(self: *LineCollector, node: *Node, data: *NodeData) !bool {
+    pub fn visit(self: *LineCollector, node: *Node, data: *NodeData) !Walk {
         const start = self.text.written().len;
         try self.text.writer.splatByteAll(' ', self.depth());
         const line = try self.tree.writeTextLine(&self.text.writer, node, data);
@@ -205,7 +205,7 @@ const LineCollector = struct {
             .contentful = line.contentful,
             .priority = linePriority(node, data, self.focused),
         });
-        return line.walk_children;
+        return line.children;
     }
 
     pub fn visitPruned(self: *LineCollector, _: *Node, data: *NodeData) !bool {
@@ -462,6 +462,7 @@ const Open = struct {
     tag_counts: std.StringArrayHashMapUnmanaged(usize) = .empty,
     name: ?[]const u8, // The children's parent_name
     invisible: bool, // visibility:hidden, so its text children are too
+    controls_only: bool, // Walk.controls from it or an ancestor
     xpath_len: usize,
     // Whether the visitor gets a `leave()` once the children are done.
     opened: bool,
@@ -471,7 +472,7 @@ fn walk(self: @This(), ctx: *WalkContext, visitor: anytype) !void {
     var stack: std.ArrayList(Open) = .empty;
     defer stack.deinit(self.arena);
 
-    try self.visitNode(ctx, &stack, self.dom_node, null, false, visitor, 1);
+    try self.visitNode(ctx, &stack, self.dom_node, null, false, false, visitor, 1);
     while (stack.items.len > 0) {
         // Everything read from `top` is read before visitNode, which can grow (move) the stack.
         const top = &stack.items[stack.items.len - 1];
@@ -488,7 +489,7 @@ fn walk(self: @This(), ctx: *WalkContext, visitor: anytype) !void {
             }
             gop.value_ptr.* += 1;
 
-            try self.visitNode(ctx, &stack, child, top.name, top.invisible, visitor, gop.value_ptr.*);
+            try self.visitNode(ctx, &stack, child, top.name, top.invisible, top.controls_only, visitor, gop.value_ptr.*);
             continue;
         }
 
@@ -508,6 +509,7 @@ fn visitNode(
     node: *Node,
     parent_name: ?[]const u8,
     parent_invisible: bool,
+    controls_only: bool,
     visitor: anytype,
     index: usize,
 ) !void {
@@ -536,7 +538,7 @@ fn visitNode(
             if (html_el.getHidden()) return;
         }
     } else if (node.is(CData.Text)) |text_node| {
-        if (parent_invisible) return;
+        if (parent_invisible or controls_only) return;
         const text = text_node.ownData();
         if (isAllWhitespace(text)) {
             return;
@@ -614,6 +616,8 @@ fn visitNode(
     var should_visit = true;
     if (invisible) {
         should_visit = false;
+    } else if (controls_only) {
+        should_visit = is_interactive or interactive.isInteractiveRole(role);
     } else if (self.interactive_only) {
         var keep = false;
         if (interactive.isInteractiveRole(role)) {
@@ -643,7 +647,7 @@ fn visitNode(
     }
 
     var opened = false;
-    var should_walk_children = true;
+    var children: Walk = .all;
     var data: NodeData = .{
         .id = cdp_node.id,
         .axn = axn,
@@ -659,16 +663,19 @@ fn visitNode(
     };
 
     if (should_visit) {
-        should_walk_children = try visitor.visit(node, &data);
+        children = try visitor.visit(node, &data);
         opened = true;
     } else if (@hasDecl(@TypeOf(visitor.*), "visitPruned")) {
         opened = try visitor.visitPruned(node, &data);
     }
 
+    // Its text is the only thing saying what it is, as outside a heading.
+    const nameless_control = should_visit and (name == null or name.?.len == 0);
     try stack.append(self.arena, .{
-        .next_child = if (should_walk_children) node._first_child else null,
+        .next_child = if (children != .none) node._first_child else null,
         .name = name,
         .invisible = invisible,
+        .controls_only = children == .controls or (controls_only and !nameless_control),
         .xpath_len = initial_xpath_len,
         .opened = opened,
     });
@@ -724,7 +731,7 @@ const JsonVisitor = struct {
     jw: *std.json.Stringify,
     tree: Self,
 
-    pub fn visit(self: *JsonVisitor, node: *Node, data: *NodeData) !bool {
+    pub fn visit(self: *JsonVisitor, node: *Node, data: *NodeData) !Walk {
         try self.jw.beginObject();
 
         try self.jw.objectField("nodeId");
@@ -811,10 +818,10 @@ const JsonVisitor = struct {
 
         if (data.options != null) {
             // Signal to not walk children, as we handled them natively
-            return false;
+            return .none;
         }
 
-        return true;
+        return .all;
     }
 
     pub fn leave(self: *JsonVisitor) !void {
@@ -871,8 +878,15 @@ fn originOf(url: []const u8) []const u8 {
     return url[0..host_end];
 }
 
+const Walk = enum {
+    all,
+    none,
+    // Only the interactive descendants: the rest is already in the name.
+    controls,
+};
+
 const TextLine = struct {
-    walk_children: bool,
+    children: Walk,
     // A name, text or value of its own, not only children.
     contentful: bool,
 };
@@ -913,7 +927,9 @@ fn writeTextLine(self: Self, writer: *std.Io.Writer, node: *Node, data: *NodeDat
         sep = " ";
     }
     if (name_to_print) |n| {
-        try writer.print("{s}'{s}'", .{ sep, n });
+        try writer.print("{s}'", .{sep});
+        try writeOneLine(writer, n);
+        try writer.writeByte('\'');
         sep = " ";
     }
     if (self.link_urls and std.mem.eql(u8, data.role, "link")) {
@@ -925,7 +941,9 @@ fn writeTextLine(self: Self, writer: *std.Io.Writer, node: *Node, data: *NodeDat
 
     if (data.value) |v| {
         if (v.len > 0) {
-            try writer.print("{s}value='{s}'", .{ sep, v });
+            try writer.print("{s}value='", .{sep});
+            try writeEscapedNewlines(writer, v);
+            try writer.writeByte('\'');
         }
     }
 
@@ -941,24 +959,49 @@ fn writeTextLine(self: Self, writer: *std.Io.Writer, node: *Node, data: *NodeDat
         try writer.writeAll(" options=[");
         for (options, 0..) |opt, i| {
             if (i > 0) try writer.writeAll(",");
-            try writer.print("'{s}'", .{opt.value});
+            try writer.writeByte('\'');
+            try writeEscapedNewlines(writer, opt.value);
+            try writer.writeByte('\'');
             if (opt.selected) {
                 try writer.writeAll("*");
             }
         }
         try writer.writeAll("]");
-        return .{ .walk_children = false, .contentful = true }; // Native handling complete, do not walk children
+        return .{ .children = .none, .contentful = true }; // Native handling complete, do not walk children
     }
     const contentful = name_to_print != null or (if (data.value) |v| v.len > 0 else false) or data.checked != null;
 
-    // If this is a leaf-like semantic node and we already have a name,
-    // skip children to avoid redundant StaticText or noise.
-    const is_leaf_semantic = std.mem.eql(u8, data.role, "link") or
-        std.mem.eql(u8, data.role, "button") or
-        std.mem.eql(u8, data.role, "heading") or
-        std.mem.eql(u8, data.role, "code");
-    const walk_children = !(is_leaf_semantic and data.name != null and data.name.?.len > 0);
-    return .{ .walk_children = walk_children, .contentful = contentful };
+    // A named one already says what its children say, but a heading or
+    // code can still wrap a link.
+    const named = data.name != null and data.name.?.len > 0;
+    const children: Walk = if (!named)
+        .all
+    else if (std.mem.eql(u8, data.role, "link") or std.mem.eql(u8, data.role, "button"))
+        .none
+    else if (std.mem.eql(u8, data.role, "heading") or std.mem.eql(u8, data.role, "code"))
+        .controls
+    else
+        .all;
+    return .{ .children = children, .contentful = contentful };
+}
+
+/// Each node is one line: a newline in a name would start another.
+fn writeOneLine(writer: *std.Io.Writer, s: []const u8) !void {
+    var words = std.mem.tokenizeAny(u8, s, &std.ascii.whitespace);
+    if (words.next()) |first| try writer.writeAll(first);
+    while (words.next()) |word| {
+        try writer.writeByte(' ');
+        try writer.writeAll(word);
+    }
+}
+
+/// Unlike a name, a value is kept exact: only its line breaks are escaped.
+fn writeEscapedNewlines(writer: *std.Io.Writer, s: []const u8) !void {
+    for (s) |c| switch (c) {
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        else => try writer.writeByte(c),
+    };
 }
 
 const NodeDetails = struct {
@@ -1290,6 +1333,53 @@ test "SemanticTree: deep nesting doesn't overflow the native stack" {
     try testing.expect(std.mem.find(u8, json_str, "\"role\":\"link\",\"name\":\"deep\"") != null);
     try testing.expectEqual(depth, std.mem.count(u8, json_str, "/g[1]"));
     try testing.expect(std.mem.endsWith(u8, json_str, "/text()[1]\",\"nodeType\":3,\"nodeValue\":\"deep\",\"children\":[]}]}"));
+}
+
+test "SemanticTree: a named heading or code keeps its links" {
+    var registry: NodeRegistry = .init(testing.allocator);
+    defer registry.deinit();
+
+    var page = try testing.pageTest("cdp/tree_heading_links.html", .{});
+    defer page.close();
+    const frame = page.frame().?;
+
+    for ([_]bool{ false, true }) |interactive_only| {
+        const st: Self = try .init(testing.arena_allocator, frame.window._document.asNode(), &registry, frame, .{ .interactive_only = interactive_only });
+
+        var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer aw.deinit();
+        try st.textStringify(&aw.writer);
+        const out = aw.written();
+
+        try testing.expect(std.mem.find(u8, out, "heading 'Post title'\n") != null);
+        try testing.expect(std.mem.find(u8, out, "link 'Post title'\n") != null);
+        try testing.expect(std.mem.find(u8, out, "button 'Follow'\n") != null);
+        try testing.expect(std.mem.find(u8, out, "link 'ls'\n") != null);
+        // A control without a name keeps the text that says what it is.
+        if (!interactive_only) try testing.expectEqual(2, std.mem.count(u8, out, "'Clickable title'"));
+        // The rest of a heading's text is in its name, not repeated below it.
+        try testing.expectEqual(1, std.mem.count(u8, out, "Acme"));
+    }
+}
+
+test "SemanticTree: a multi-line name or value stays on its node's line" {
+    var registry: NodeRegistry = .init(testing.allocator);
+    defer registry.deinit();
+
+    var page = try testing.pageTest("cdp/tree_multiline.html", .{});
+    defer page.close();
+    const frame = page.frame().?;
+
+    const st: Self = try .init(testing.arena_allocator, frame.window._document.asNode(), &registry, frame, .{});
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try st.textStringify(&aw.writer);
+    const out = aw.written();
+
+    try testing.expect(std.mem.find(u8, out, "button 'Close dialog'\n") != null);
+    try testing.expect(std.mem.find(u8, out, "textbox value='first line\\nsecond line'\n") != null);
+    try testing.expect(std.mem.find(u8, out, "textbox value='a   b'\n") != null);
 }
 
 test "SemanticTree: maxBytes keeps alerts and controls, marks the rest" {

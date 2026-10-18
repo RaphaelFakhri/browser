@@ -1464,6 +1464,7 @@ const SyncContext = struct {
     status_text: http.StatusText = .{},
     body: std.ArrayList(u8),
     headers: std.ArrayList(http.Header) = .empty,
+    content_type: ?[]const u8 = null,
 
     // Acquired on the first byte we have to buffer.
     // Ownership moves to the SyncResponse.
@@ -1483,6 +1484,10 @@ const SyncContext = struct {
         const allocator = try self.bodyAllocator(body_len);
         if (body_len > 0) {
             try self.body.ensureTotalCapacityPrecise(allocator, body_len);
+        }
+
+        if (transfer.contentType()) |content_type| {
+            self.content_type = try allocator.dupe(u8, content_type);
         }
 
         if (self.options.copy_headers) {
@@ -2083,6 +2088,7 @@ pub const Request = struct {
         stylesheet,
         eventsource,
         image,
+        text_track,
         worker,
 
         // Allowed Values: Document, Stylesheet, Image, Media, Font, Script,
@@ -2098,6 +2104,7 @@ pub const Request = struct {
                 .stylesheet => "Stylesheet",
                 .eventsource => "EventSource",
                 .image => "Image",
+                .text_track => "TextTrack",
                 .worker => "Script",
             };
         }
@@ -2236,7 +2243,8 @@ const SyncResponse = struct {
     status: u16,
     body: std.ArrayList(u8),
     status_text: http.StatusText,
-    headers: []const http.Header,
+    headers: []const http.Header, // only captured when copy_headers = true
+    content_type: ?[]const u8, // always captured (most callers need it)
     arena: ?*lp.Arena, // need only if there's a body, or we're copying the headers
 
     pub fn deinit(self: *SyncResponse) void {
@@ -2664,6 +2672,7 @@ pub const Transfer = struct {
             .script => "script",
             .stylesheet => "style",
             .image => "image",
+            .text_track => "track",
             .worker => "worker",
         };
     }
@@ -2880,6 +2889,7 @@ pub const Transfer = struct {
                 .status_text = sync_ctx.status_text,
                 .body = sync_ctx.body,
                 .headers = sync_ctx.headers.items,
+                .content_type = sync_ctx.content_type,
                 .arena = sync_ctx.arena,
             },
             .err => |e| return e,
@@ -3409,6 +3419,7 @@ pub const Transfer = struct {
                 .stylesheet => "link",
                 .eventsource, .worker => "other",
                 .image => "img",
+                .text_track => "track",
             },
             .protocol = t.protocol,
             .start = t.start_time,
