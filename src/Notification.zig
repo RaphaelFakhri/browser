@@ -381,7 +381,7 @@ pub const ConsoleMessage = struct {
         worker,
     },
     type: ConsoleMessageType,
-    values: []js.Value,
+    values: []const js.Value,
     url: ?[]const u8 = null,
     line: ?u32 = null,
     columns: ?u32 = null,
